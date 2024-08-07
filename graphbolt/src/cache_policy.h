@@ -35,7 +35,8 @@ namespace storage {
 
 struct CacheKey {
   auto getKey() const {
-    return (static_cast<int64_t>(key_upper_) << 32) + key_lower_;
+    return (static_cast<int64_t>(key_higher_16_bits_) << 32) +
+           key_lower_32_bits_;
   }
 
   CacheKey(int64_t key) : CacheKey(key, std::numeric_limits<int64_t>::min()) {}
@@ -44,8 +45,8 @@ struct CacheKey {
       : freq_(0),
         // EndUse<true>() should be called to reset the reference count.
         reference_count_(-1),
-        key_upper_(key >> 32),
-        key_lower_(key),
+        key_higher_16_bits_(key >> 32),
+        key_lower_32_bits_(key),
         position_in_cache_(position) {
     TORCH_CHECK(key == getKey());
     static_assert(sizeof(CacheKey) == 2 * sizeof(int64_t));
@@ -96,8 +97,8 @@ struct CacheKey {
   template <bool write>
   CacheKey& EndUse() {
     ::cuda::std::atomic_ref ref(reference_count_);
-    // The EndUse operation needs to synchronize with InUse and BeingWritten
-    // operations. So we have an release-acquire ordering here.
+    // The EndUse operation needs to synchronize with the InUse operation. So we
+    // have an release-acquire ordering between the two.
     // https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
     if constexpr (write) {
       ref.fetch_add(1, ::cuda::std::memory_order_release);
@@ -116,9 +117,10 @@ struct CacheKey {
 
   bool BeingWritten() const {
     ::cuda::std::atomic_ref ref(reference_count_);
-    // The operations after a call to this function need to happen after the
-    // load operation. Hence the acquire order.
-    return ref.load(::cuda::std::memory_order_acquire) < 0;
+    // The only operation coming after this op is the StartRead operation. Since
+    // StartRead is a refcount increment operation, it is fine if we don't
+    // synchronize with EndUse ops.
+    return ref.load(::cuda::std::memory_order_relaxed) < 0;
   }
 
   friend std::ostream& operator<<(std::ostream& os, const CacheKey& key_ref) {
@@ -133,8 +135,8 @@ struct CacheKey {
   // Access only through an std::atomic_ref instance atomically.
   int8_t reference_count_;
   // Keys are restricted to be 48-bit unsigned integers.
-  uint16_t key_upper_;
-  uint32_t key_lower_;
+  uint16_t key_higher_16_bits_;
+  uint32_t key_lower_32_bits_;
   int64_t position_in_cache_;
 };
 
